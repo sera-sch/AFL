@@ -1,3 +1,10 @@
+# Fork info
+
+Fork with support for a custom mutator library, somewhat ripped from AFL++.
+Use the `-D` flag to pass the library path and `-X` to set the test buffer size in kilobytes.
+The shared library should define an API `size_t mutator(uint8_t **data, size_t input_size, size_t max_size, unsigned int seed)`.
+Mutate the data buffer and return the new input size.
+
 # american fuzzy lop
 
 [![Build Status](https://travis-ci.org/google/AFL.svg?branch=master)](https://travis-ci.org/google/AFL)

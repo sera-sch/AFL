@@ -90,6 +90,8 @@
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
 
+size_t (*custom_mutator)(uint8_t **data, size_t size, size_t max_size, unsigned int seed);
+void *custom_mutator_handle;
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -105,7 +107,8 @@ EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
 EXP_ST u32 exec_tmout = EXEC_TIMEOUT; /* Configurable exec timeout (ms)   */
 static u32 hang_tmout = EXEC_TIMEOUT; /* Timeout used for hang det (ms)   */
 
-EXP_ST u64 mem_limit  = MEM_LIMIT;    /* Memory cap for child (MB)        */
+EXP_ST u64 mem_limit  = MEM_LIMIT,    /* Memory cap for child (MB)        */
+           mutator_buf_size = 4096;   /* Memory cap for mutation buffer   */
 
 static u32 stats_update_freq = 1;     /* Stats update frequency (execs)   */
 
@@ -311,7 +314,8 @@ enum {
   /* 13 */ STAGE_EXTRAS_UI,
   /* 14 */ STAGE_EXTRAS_AO,
   /* 15 */ STAGE_HAVOC,
-  /* 16 */ STAGE_SPLICE
+  /* 16 */ STAGE_SPLICE,
+  /* 17 */ STAGE_CUSTOM
 };
 
 /* Stage value types */
@@ -4981,7 +4985,7 @@ static u8 fuzz_one(char** argv) {
 
   s32 len, fd, temp_len, i, j;
   u8  *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
-  u64 havoc_queued,  orig_hit_cnt, new_hit_cnt;
+  u64 havoc_queued = 0,  orig_hit_cnt, new_hit_cnt;
   u32 splice_cycle = 0, perf_score = 100, orig_perf, prev_cksum, eff_cnt = 1;
 
   u8  ret_val = 1, doing_det = 0;
@@ -5118,13 +5122,15 @@ static u8 fuzz_one(char** argv) {
      testing in earlier, resumed runs (passed_det). */
 
   if (skip_deterministic || queue_cur->was_fuzzed || queue_cur->passed_det)
-    goto havoc_stage;
+//    goto havoc_stage;
+  goto custom_mutator_stage;
 
   /* Skip deterministic fuzzing if exec path checksum puts this out of scope
      for this master instance. */
 
   if (master_max && (queue_cur->exec_cksum % master_max) != master_id - 1)
-    goto havoc_stage;
+//    goto havoc_stage;
+  goto custom_mutator_stage;
 
   doing_det = 1;
 
@@ -6083,6 +6089,51 @@ skip_extras:
 
   if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
 
+  /******************
+   * CUSTOM MUTATOR *
+   ******************/
+
+// Custom mutator stage heavily taken from AFL++
+// https://github.com/vanhauser-thc/AFLplusplus/blob/cc1d6b33b1524d52b21a6e9794ee6b0d6a2a9d50/src/afl-fuzz-one.c
+custom_mutator_stage:
+  if(!custom_mutator) {
+      SAYF("No custom mutator defined, just using havoc stage...");
+      goto havoc_stage;
+  }
+
+  stage_name = "custom mutator";
+  stage_short = "custom";
+  stage_max = HAVOC_CYCLES  * perf_score / havoc_div / 100;
+  if (stage_max < HAVOC_MIN) stage_max = HAVOC_MIN;
+  orig_hit_cnt = queued_paths + unique_crashes;
+
+  for (stage_cur = 0; stage_cur < stage_max; ++stage_cur) {
+    // We don't care about extra test entries, can't mix them in anyway
+    u8* mutated_buf = ck_alloc(mutator_buf_size); // It might be good to allocate a lot more intelligently, but this is fine for my use.
+    size_t mutated_size = custom_mutator(&mutated_buf, len, mutator_buf_size, UR(MAX_FILE));
+    if (mutated_size > 0) {
+      out_buf = ck_realloc(out_buf, mutated_size);
+      memcpy(out_buf, mutated_buf, mutated_size);
+      if(common_fuzz_stuff(argv, out_buf, (u32)mutated_size)) {
+        goto abandon_entry;
+      }
+      if(queued_paths != havoc_queued) {
+        if (perf_score <= 16*100) {
+        stage_max *= 2;
+        perf_score *= 2;
+        }
+      }
+      havoc_queued = queued_paths;
+    }
+    if (mutated_size < len) out_buf = ck_realloc(out_buf, len);
+    memcpy(out_buf, in_buf, len);
+  }
+  new_hit_cnt = queued_paths + unique_crashes;
+  stage_finds[STAGE_CUSTOM] += new_hit_cnt - orig_hit_cnt;
+  stage_cycles[STAGE_CUSTOM] += stage_max;
+  ret_val = 0;
+  goto abandon_entry;
+
   /****************
    * RANDOM HAVOC *
    ****************/
@@ -6627,7 +6678,7 @@ retry_splicing:
     out_buf = ck_alloc_nozero(len);
     memcpy(out_buf, in_buf, len);
 
-    goto havoc_stage;
+    goto custom_mutator_stage;
 
   }
 
@@ -7089,6 +7140,10 @@ static void usage(u8* argv0) {
 
        "  -i dir        - input directory with test cases\n"
        "  -o dir        - output directory for fuzzer findings\n\n"
+
+       "Custom mutator settings:\n\n"
+       "  -D filename   - path to custom mutator shared library\n"
+       "  -X kbs        - memory size allocated per test case passed to mutator library (defaults to 4096)\n\n"
 
        "Execution control settings:\n\n"
 
@@ -7764,9 +7819,25 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QD:X:")) > 0)
 
     switch (opt) {
+
+      case 'D': /* custom mutator */
+        ACTF("Loading custom mutator %s", optarg);
+        char *dl_error;
+        custom_mutator_handle = dlopen(optarg, RTLD_NOW);
+        if ((dl_error = dlerror()) != NULL) FATAL("%s", dl_error);
+        custom_mutator = dlsym(custom_mutator_handle, "mutator");
+        if ((dl_error = dlerror()) != NULL) FATAL("%s", dl_error);
+        OKF("Loaded custom mutator.");
+        break;
+
+      case 'X': /* memory limit */
+        sscanf(optarg, "%llu", &mutator_buf_size);
+        mutator_buf_size *= 1024;
+        OKF("Set memory limit to %llu", mutator_buf_size);
+        break;
 
       case 'i': /* input dir */
 
@@ -8137,6 +8208,9 @@ stop_fuzzing:
   destroy_extras();
   ck_free(target_path);
   ck_free(sync_id);
+
+  /* Close handle to custom mutator */
+  dlclose(custom_mutator_handle);
 
   alloc_report();
 
