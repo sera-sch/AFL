@@ -6110,6 +6110,7 @@ custom_mutator_stage:
   for (stage_cur = 0; stage_cur < stage_max; ++stage_cur) {
     // We don't care about extra test entries, can't mix them in anyway
     u8* mutated_buf = ck_alloc(mutator_buf_size); // It might be good to allocate a lot more intelligently, but this is fine for my use.
+    memcpy(mutated_buf, out_buf, len);
     size_t mutated_size = custom_mutator(&mutated_buf, len, mutator_buf_size, UR(MAX_FILE));
     if (mutated_size > 0) {
       out_buf = ck_realloc(out_buf, mutated_size);
