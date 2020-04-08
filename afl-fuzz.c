@@ -5089,7 +5089,7 @@ static u8 fuzz_one(char** argv) {
    * TRIMMING *
    ************/
 
-  if (!dumb_mode && !queue_cur->trim_done) {
+  /*if (!dumb_mode && !queue_cur->trim_done) {
 
     u8 res = trim_case(argv, queue_cur, in_buf);
 
@@ -5101,7 +5101,7 @@ static u8 fuzz_one(char** argv) {
       goto abandon_entry;
     }
 
-    /* Don't retry trimming, even if it failed. */
+    // Don't retry trimming, even if it failed. 
 
     queue_cur->trim_done = 1;
 
@@ -5110,7 +5110,7 @@ static u8 fuzz_one(char** argv) {
   }
 
   memcpy(out_buf, in_buf, len);
-
+*/
   /*********************
    * PERFORMANCE SCORE *
    *********************/
@@ -6106,6 +6106,7 @@ custom_mutator_stage:
   stage_max = HAVOC_CYCLES  * perf_score / havoc_div / 100;
   if (stage_max < HAVOC_MIN) stage_max = HAVOC_MIN;
   orig_hit_cnt = queued_paths + unique_crashes;
+  memcpy(out_buf, in_buf, len);
 
   for (stage_cur = 0; stage_cur < stage_max; ++stage_cur) {
     // We don't care about extra test entries, can't mix them in anyway
